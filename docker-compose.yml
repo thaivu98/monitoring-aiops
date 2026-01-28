@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  aiops-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aiops-app
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+    volumes:
+      - ./app:/app
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: aiops-postgres
+    env_file:
+      - .env
+    volumes:
+      - ./database:/var/lib/postgresql/data
+      - ./app/core/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    ports:
+      - "5432:5432"

@@ -1,0 +1,11 @@
+pandas
+numpy
+requests
+scikit-learn
+sqlalchemy
+psycopg2-binary
+pydantic
+sqlalchemy
+psycopg2-binary
+pydantic
+python-dotenv
