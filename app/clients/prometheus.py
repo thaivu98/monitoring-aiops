@@ -16,7 +16,7 @@ class PrometheusClient:
             'step': step
         }
         try:
-            response = requests.get(self.query_range_url, params=params, timeout=10)
+            response = requests.get(self.query_range_url, params=params, timeout=30)
             response.raise_for_status()
             data = response.json()
             if data['status'] != 'success':
@@ -78,7 +78,7 @@ class PrometheusClient:
         }
         
         try:
-            response = requests.get(self.query_range_url, params=params, timeout=10)
+            response = requests.get(self.query_range_url, params=params, timeout=30)
             response.raise_for_status()
             data = response.json()
             
