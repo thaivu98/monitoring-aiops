@@ -10,7 +10,7 @@ class AlertmanagerClient:
             
         self.base_url = base_url.rstrip('/')
         self.verify_ssl = verify_ssl
-        self.alert_url = f"{self.base_url}/api/v1/alerts"
+        self.alert_url = f"{self.base_url}/api/v2/alerts"
         logging.info(f"Alertmanager Client initialized at {self.base_url} (SSL Verify: {self.verify_ssl})")
 
     def send_alert(self, alert_payload):
@@ -29,6 +29,8 @@ class AlertmanagerClient:
             )
             response.raise_for_status()
             logging.info(f"Alert sent successfully: {alert_payload['labels'].get('alertname')}")
+            return True
             
         except Exception as e:
             logging.error(f"Failed to send alert to Alertmanager: {e}")
+            return False

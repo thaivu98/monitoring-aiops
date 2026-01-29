@@ -2,7 +2,7 @@ import requests
 import pandas as pd
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 class PrometheusClient:
     def __init__(self, base_url, verify_ssl=True):
@@ -12,8 +12,33 @@ class PrometheusClient:
         
         self.base_url = base_url.rstrip('/')
         self.verify_ssl = verify_ssl
+        self.query_range_url = f"{self.base_url}/api/v1/query"
+        self.query_instant_url = f"{self.base_url}/api/v1/query"
+        # Sửa lại: query_range_url phải là query_range
         self.query_range_url = f"{self.base_url}/api/v1/query_range"
         logging.info(f"Prometheus Client initialized at {self.base_url} (SSL Verify: {self.verify_ssl})")
+
+    def fetch_instant_metric(self, query):
+        """Lấy giá trị hiện tại (Instant Query)"""
+        params = {'query': query}
+        try:
+            response = requests.get(self.query_instant_url, params=params, timeout=10, verify=self.verify_ssl)
+            response.raise_for_status()
+            data = response.json()
+            if data['status'] == 'success':
+                result = data['data']['result']
+                all_data = []
+                for res in result:
+                    metric_info = res['metric']
+                    val = res['value'] # [timestamp, value]
+                    row = {k: v for k, v in metric_info.items()}
+                    row['ds'] = datetime.fromtimestamp(val[0], tz=timezone.utc).replace(tzinfo=None)
+                    row['y'] = float(val[1])
+                    all_data.append(row)
+                return pd.DataFrame(all_data)
+        except Exception as e:
+            logging.error(f"Error in instant query: {e}")
+        return pd.DataFrame()
 
     def fetch_metric_series(self, query, start_time, end_time, step='5m'):
         params = {

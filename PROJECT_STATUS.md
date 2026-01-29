@@ -16,6 +16,12 @@ File này lưu giữ ngữ cảnh và tiến độ của dự án để AI và C
 - [x] Tài liệu README.md và .env.example chuyên nghiệp (Tiếng Việt).
 - [x] Hệ thống phát hiện bất thường nâng cao (Sliding Window 3/5, Seasonality Aware).
 
+## 🔍 Cách kiểm tra trạng thái (Diagnostics)
+- **Qua Logs**: Chạy `docker-compose logs -f aiops-app`.
+    - ⚡ `[STAGE: LEARNING]`: Đang nạp dữ liệu lịch sử.
+    - 🔍 `[STAGE: MONITORING]`: AI đang hoạt động và giám sát lỗi.
+- **Qua File Status**: Kiểm tra file `status.json` trong container để xem danh sách metric và số lượng dữ liệu đã học được.
+
 ## ⚠️ Lưu ý quan trọng (Important Notes)
 - File cấu hình thực tế nằm ở `.env` (đã có trong `.gitignore`).
 - Dữ liệu raw metric được lưu tại bảng `metric_values`, tự động xóa sau 30 ngày.

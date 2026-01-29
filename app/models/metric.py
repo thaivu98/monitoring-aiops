@@ -11,7 +11,7 @@ class MetricModel(Base):
     instance = Column(String, nullable=True)
     mean = Column(Float, nullable=True)
     std = Column(Float, nullable=True)
-    last_updated = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    last_updated = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc), onupdate=lambda: datetime.datetime.now(datetime.timezone.utc))
 
 
 class MetricValue(Base):
