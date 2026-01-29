@@ -8,6 +8,8 @@ class Settings:
     PROM_QUERY: str = os.environ.get('PROM_QUERY', 'up')
     LOOKBACK_HOURS: int = int(os.environ.get('LOOKBACK_HOURS', 720))
     CHECK_INTERVAL_MINUTES: int = int(os.environ.get('CHECK_INTERVAL_MINUTES', 5))
+    PROM_SKIP_SSL: bool = os.environ.get('PROM_SKIP_SSL', 'false').lower() == 'true'
+    AM_SKIP_SSL: bool = os.environ.get('AM_SKIP_SSL', 'false').lower() == 'true'
 
 
 settings = Settings()

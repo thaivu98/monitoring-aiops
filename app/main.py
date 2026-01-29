@@ -55,8 +55,8 @@ def run_once(
     # Ensure tables exist
     Base.metadata.create_all(bind=engine)
 
-    prom = PrometheusClient(prometheus_url)
-    am = AlertmanagerClient(alertmanager_url)
+    prom = PrometheusClient(prometheus_url, verify_ssl=not settings.PROM_SKIP_SSL)
+    am = AlertmanagerClient(alertmanager_url, verify_ssl=not settings.AM_SKIP_SSL)
     engine_service = AnomalyEngine()
     llm = LLMClient()
 
@@ -184,8 +184,29 @@ def run_once(
         session.close()
 
 
+def wait_for_db(timeout=60):
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            session = SessionLocal()
+            session.execute(func.now())
+            session.close()
+            logging.info("Database is ready!")
+            return True
+        except Exception:
+            logging.info("Waiting for database...")
+            time.sleep(2)
+    logging.error("Database connection timeout")
+    return False
+
+
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    
+    # Wait for DB before starting
+    if not wait_for_db():
+        exit(1)
+
     logging.info(f"Starting AIOps engine. Interval: {settings.CHECK_INTERVAL_MINUTES}m, Lookback: {settings.LOOKBACK_HOURS}h")
     
     while True:
