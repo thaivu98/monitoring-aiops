@@ -31,15 +31,17 @@ class EmailReceiver(BaseReceiver):
         
         msg['Subject'] = f"{subject_prefix} {subject}"
 
+        import re
+        clean_description = re.sub('<[^<]+?>', '', description)
+        
         body = (
             f"AIOps Notification\n"
             f"==================\n"
             f"Status: {status.upper()}\n"
-            f"Subject: {subject}\n"
-            f"Instance: {metadata.get('instance')}\n"
-            f"Severity: {metadata.get('severity')}\n\n"
-            f"Description: {description}\n\n"
-            f"Summary: {metadata.get('summary')}"
+            f"Server: {metadata.get('instance')}\n"
+            f"Severity: {metadata.get('severity')}\n"
+            f"------------------\n\n"
+            f"{clean_description}\n"
         )
         msg.attach(MIMEText(body, 'plain'))
 

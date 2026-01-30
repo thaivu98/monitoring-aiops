@@ -4,10 +4,12 @@ from .base import BaseReceiver
 from .telegram import TelegramReceiver
 from .email import EmailReceiver
 from core.config import settings
+import concurrent.futures
 
 class AlertManager:
     def __init__(self):
         self.receivers: List[BaseReceiver] = []
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
         
         # Initialize Telegram
         logging.info(f"Checking Telegram: ENABLED={settings.TELEGRAM_ENABLED}")
@@ -56,3 +58,7 @@ class AlertManager:
                  logging.error(f"Broadcast to {receiver_name} crashed: {e}")
         
         return any_success
+
+    def async_broadcast(self, subject: str, description: str, metadata: dict):
+        """Non-blocking broadcast using a thread pool."""
+        self._executor.submit(self.broadcast, subject, description, metadata)

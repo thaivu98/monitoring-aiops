@@ -11,6 +11,7 @@ from clients.llm import LLMClient
 from receivers import AlertManager
 from services.anomaly_service import AnomalyEngine
 from core.database import SessionLocal, engine
+from services.history_cache import history_cache
 from models.base import Base
 from models.metric import MetricModel, MetricValue
 from sqlalchemy import func
@@ -90,6 +91,7 @@ def run_once(prom, alert_manager, engine_service, llm, query=None, lookback_hour
     lookback_hours = lookback_hours or settings.LOOKBACK_HOURS
     now_ts = int(time.time())
 
+    # 1. Fetch current active series labels
     df_active = prom.fetch_instant_metric(query)
     if df_active.empty:
         return {}
@@ -98,58 +100,70 @@ def run_once(prom, alert_manager, engine_service, llm, query=None, lookback_hour
     state_updates = {"windows": {}, "firing": {}}
     
     try:
-        group_keys = [c for c in df_active.columns if c not in ('ds', 'y')]
-        if group_keys:
-            group_keys = [k for k in group_keys if df_active[k].notna().any()]
-            series_groups = list(df_active.groupby(group_keys, dropna=False))
+        # Load Metric Models for mapping mid -> m_id
+        metric_models = session.query(MetricModel).filter(MetricModel.metric_fingerprint.like(f"__name__={query}%")).all()
+        mid_map = {m.metric_fingerprint: m for m in metric_models}
+        
+        # 2. Determine fetch_start (only for the window since last sync)
+        earliest_ts = None
+        if metric_models:
+            ids = [m.id for m in metric_models]
+            earliest_ts = session.query(func.max(MetricValue.timestamp)).filter(MetricValue.metric_id.in_(ids)).scalar()
+        
+        fetch_start = int(earliest_ts.timestamp()) + 1 if earliest_ts else int((datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=lookback_hours)).timestamp())
+        
+        # 3. Delta Sync from Prometheus
+        df_all_deltas = prom.fetch_metric_series(query, fetch_start, now_ts, step)
+        
+        if not df_all_deltas.empty:
+            label_cols = [c for c in df_all_deltas.columns if c not in ('ds', 'y')]
         else:
-            series_groups = [(None, df_active)]
+            label_cols = []
 
+        # Prepare Delta Map for O(1) lookup
+        delta_map = {}
+        if not df_all_deltas.empty:
+            # Pre-convert all labels to string for reliable mapping
+            df_lookup = df_all_deltas.copy()
+            for col in label_cols:
+                df_lookup[col] = df_lookup[col].astype(str)
+            
+            for name, group in df_lookup.groupby(label_cols, dropna=False):
+                name_tuple = (name,) if not isinstance(name, tuple) else name
+                delta_map[name_tuple] = group
+
+        # 4. Process each active series
+        group_keys = [c for c in df_active.columns if c not in ('ds', 'y')]
+        series_groups = list(df_active.groupby(group_keys, dropna=False))
+
+        all_new_values = []
         for group_val, group_df in series_groups:
-            if group_keys:
-                tmp_vals = (group_val,) if not isinstance(group_val, tuple) else group_val
-                labels = {k: str(tmp_vals[i]) for i, k in enumerate(group_keys)}
-            else:
-                labels = {'metric': query}
-            
-            mid_fingerprint = metric_id_from_labels(labels)
-            
-            metric = session.query(MetricModel).filter_by(metric_fingerprint=mid_fingerprint).first()
-            if not metric:
-                metric = MetricModel(metric_fingerprint=mid_fingerprint, job=labels.get('job'), instance=labels.get('instance'))
-                session.add(metric)
-                session.flush()
-            
-            last_val_ts = session.query(func.max(MetricValue.timestamp)).filter_by(metric_id=metric.id).scalar()
-            fetch_start = int(last_val_ts.timestamp()) + 1 if last_val_ts else int((datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=lookback_hours)).timestamp())
-            
-            if now_ts > fetch_start:
-                metric_name = labels.get('__name__', query)
-                specific_query = labels_to_selector(metric_name, labels)
-                df_delta = prom.fetch_metric_series(specific_query, fetch_start, now_ts, step)
+            # group_val is already a tuple (or single val) and matches label_cols
+            group_tuple = (group_val,) if not isinstance(group_val, tuple) else group_val
+            group_labels = {k: str(v) for k, v in zip(group_keys, group_tuple)}
+            mid_key = metric_id_from_labels(group_labels)
+            m_obj = mid_map.get(mid_key)
+            if not m_obj: continue
 
-                if not df_delta.empty:
-                    new_values = [MetricValue(metric_id=metric.id, timestamp=row['ds'], value=row['y']) for _, row in df_delta.iterrows()]
-                    session.add_all(new_values)
-                    session.flush()
+            # O(1) Lookup instead of O(N) Masking
+            df_s_delta = delta_map.get(group_tuple, pd.DataFrame())
+            if not df_s_delta.empty:
+                history_cache.update(m_obj.id, df_s_delta)
+                for _, r in df_s_delta.iterrows():
+                    all_new_values.append(MetricValue(metric_id=m_obj.id, timestamp=r['ds'], value=r['y']))
 
-            # 6. Fetch window for analysis (24h baseline)
-            analysis_threshold = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=24)
-            history_data = session.query(MetricValue).filter(MetricValue.metric_id == metric.id, MetricValue.timestamp >= analysis_threshold).order_by(MetricValue.timestamp.asc()).all()
+            # Analysis
+            df_hist = history_cache.get_history(m_obj.id)
+            if not df_hist.empty and len(df_hist) >= 5:
+                res_anom = engine_service.train_and_detect(df_hist, fingerprint=mid_key)
+                state_updates["windows"][mid_key] = res_anom['is_anomaly']
+                state_updates["firing"][mid_key] = res_anom
 
-            if len(history_data) < 20: 
-                # Fallback to last 100 points
-                history_data = session.query(MetricValue).filter(MetricValue.metric_id == metric.id).order_by(MetricValue.timestamp.desc()).limit(100).all()
-                history_data.reverse()
-
-            if len(history_data) < 5:
-                continue
-
-            df_analysis = pd.DataFrame([{'ds': v.timestamp, 'y': v.value} for v in history_data])
-            result = engine_service.train_and_detect(df_analysis, fingerprint=mid_fingerprint)
-            
-            state_updates["windows"][mid_fingerprint] = result['is_anomaly']
-            state_updates["firing"][mid_fingerprint] = result 
+        # Batch Save new points to Postgres for durability
+        if all_new_values:
+            session.add_all(all_new_values)
+            session.flush()
+            logging.info(f"Saved {len(all_new_values)} points for {query}")
 
         session.commit()
         logging.info(f"✅ Finished metric: {query}")
@@ -199,6 +213,9 @@ if __name__ == '__main__':
     engine_service = AnomalyEngine()
     llm = LLMClient()
 
+    # PRE-LOAD TurboMode History Cache
+    history_cache.initialize(engine, settings.ANALYSIS_WINDOW_HOURS)
+
     while True:
         try:
             logging.info("Starting anomaly detection cycle...")
@@ -238,20 +255,31 @@ if __name__ == '__main__':
 
                     if is_anom: logging.info(f"⚠️ [DETECTED] {mid} | Window: {sum(w)}/3")
 
-                    if not is_firing and (sum(w) >= 3 or res.get('reason') == 'host_down'):
-                        if alert_manager.broadcast("Anomaly Detected", llm.explain_anomaly(mid, res), {'instance': get_inst(mid), 'severity': 'critical', 'status': 'firing'}):
-                            firing_registry[mid], last_alert_at[mid] = True, time.time()
-                    
-                    elif is_firing and is_anom:
-                        if (time.time() - last_alert_at.get(mid, 0)) >= settings.ALERT_REPEAT_INTERVAL_MINUTES * 60:
-                            if alert_manager.broadcast("Anomaly Persisting", llm.explain_anomaly(mid, res), {'instance': get_inst(mid), 'severity': 'critical', 'status': 'repeating'}):
-                                last_alert_at[mid] = time.time()
-                    
-                    elif is_firing and sum(w[-3:]) == 0:
-                        if alert_manager.broadcast("Anomaly Resolved", f"Metric {mid} returned to normal.", {'instance': get_inst(mid), 'severity': 'info', 'status': 'resolved'}):
-                            firing_registry[mid] = False
-                            last_alert_at.pop(mid, None)
-                            windows[mid] = [0] * 5
+                    # Use firing_registry as prev_firing and global_state as state for consistency
+                    prev_firing = firing_registry
+                    state = global_state # This 'state' refers to the global_state loaded at the beginning of the loop
+
+                    firing = (sum(w) >= 3 or res.get('reason') == 'host_down') # Determine if it should be firing
+
+                    if firing:
+                        # New anomaly
+                        if mid not in prev_firing:
+                            firing_registry[mid] = res 
+                            firing_registry[mid]["last_alert_at"] = datetime.now().isoformat()
+                            alert_manager.async_broadcast("Anomaly Detected", llm.explain_anomaly(mid, res), {'instance': get_inst(mid), 'severity': 'critical', 'status': 'firing'})
+                        else:
+                            # Repeating anomaly check
+                            last_alert_ts = datetime.fromisoformat(prev_firing[mid].get("last_alert_at", "1970-01-01"))
+                            if (datetime.now() - last_alert_ts) >= timedelta(minutes=settings.ALERT_REPEAT_INTERVAL_MINUTES):
+                                firing_registry[mid] = res 
+                                firing_registry[mid]["last_alert_at"] = datetime.now().isoformat()
+                                alert_manager.async_broadcast("Anomaly Persisting", llm.explain_anomaly(mid, res), {'instance': get_inst(mid), 'severity': 'critical', 'status': 'repeating'})
+                    else:
+                        # Resolved
+                        if mid in prev_firing:
+                            alert_manager.async_broadcast("Anomaly Resolved", f"Metric {mid} returned to normal.", {'instance': get_inst(mid), 'severity': 'info', 'status': 'resolved'})
+                            firing_registry.pop(mid, None) # Remove from firing registry
+                            windows[mid] = [0] * 5 # Reset window for resolved metric
 
             save_state({"windows": windows, "firing": firing_registry, "last_alert_at": last_alert_at})
             update_status_json(load_state())

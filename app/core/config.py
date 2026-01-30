@@ -17,6 +17,7 @@ class Settings:
     METRIC_DISCOVERY_ENABLED: bool = os.environ.get('METRIC_DISCOVERY_ENABLED', 'true').lower() == 'true'
     METRIC_DISCOVERY_PATTERN: str = os.environ.get('METRIC_DISCOVERY_PATTERN', '^(up|node_cpu_seconds_total|node_memory_.*|node_filesystem_.*|node_network_.*)$')
     MAX_WORKERS: int = int(os.environ.get('MAX_WORKERS', 10))
+    ANALYSIS_WINDOW_HOURS: int = int(os.environ.get('ANALYSIS_WINDOW_HOURS', 168)) # Default 7 days
 
     # Telegram alerts
     TELEGRAM_ENABLED: bool = os.environ.get('TELEGRAM_ENABLED', 'false').lower() == 'true'

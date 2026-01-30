@@ -15,7 +15,7 @@ class TelegramReceiver(BaseReceiver):
 
         status = metadata.get('status', 'firing')
         if status == 'firing':
-            icon, title = "🔥", "AI PHÁT HIỆN LỖI!"
+            icon, title = "🔥", "TAO PHÁT HIỆN LỖI!"
         elif status == 'repeating':
             icon, title = "🔄", "NHẮC NHỞ: SỰ CỐ VẪN ĐANG DIỄN RA"
         else:
@@ -24,11 +24,11 @@ class TelegramReceiver(BaseReceiver):
         message = (
             f"🤖 <b>{title}</b>\n"
             f"──────────────────\n"
-            f"{icon} <b>Trạng thái:</b> {status.upper()}\n"
-            f"🖥️ <b>Server:</b> {metadata.get('instance', 'Unknown')}\n"
-            f"⚠️ <b>Mức độ:</b> {metadata.get('severity', 'critical')}\n\n"
-            f"📝 <b>Phân tích:</b>\n{description}\n\n"
-            f"📊 <b>Tóm tắt:</b> {metadata.get('summary', '')}"
+            f"{icon} <b>TRẠNG THÁI:</b> {status.upper()}\n"
+            f"🖥️ <b>SERVER:</b> {metadata.get('instance', 'Unknown')}\n"
+            f"⚠️ <b>MỨC ĐỘ:</b> {metadata.get('severity', 'critical').upper()}\n"
+            f"──────────────────\n\n"
+            f"{description}\n"
         )
 
         payload = {

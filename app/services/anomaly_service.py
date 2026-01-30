@@ -19,18 +19,25 @@ class AnomalyEngine:
         return f"<AnomalyEngine features: hour_sin, hour_cos, weekday_sin, weekday_cos>"
 
     def preprocess(self, df: pd.DataFrame) -> pd.DataFrame:
-        df = df.copy()
         if not np.issubdtype(df['ds'].dtype, np.datetime64):
             df['ds'] = pd.to_datetime(df['ds'])
+        
+        # Convert 'y' to numeric first, then check for NaNs
+        # This ensures that if 'y' contains non-numeric values that become NaN,
+        # they are handled by the interpolation logic.
         df['y'] = pd.to_numeric(df['y'], errors='coerce')
+
         if df['y'].isna().any():
+            df = df.copy() # Only copy if we need to mutate (interpolate)
             df = df.set_index('ds')
-            df['y'] = df['y'].interpolate(method='time')
-            df['y'] = df['y'].bfill().ffill()
+            df['y'] = df['y'].interpolate(method='time').bfill().ffill()
             df = df.reset_index()
         return df
 
     def add_time_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        if 'hour_sin' in df.columns:
+            return df
+        
         df = df.copy()
         df['hour'] = df['ds'].dt.hour
         df['weekday'] = df['ds'].dt.weekday
