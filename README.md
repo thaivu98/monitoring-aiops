@@ -74,14 +74,52 @@ Dự án được cấu trúc theo mô hình phẳng bên trong thư mục `app/
 
 ## ⚙️ Giải thích cấu hình (.env)
 
-| Biến | Ý nghĩa |
-| :--- | :--- |
+| `PROM_QUERY` | Câu lệnh PromQL để lấy dữ liệu (Ví dụ: `up`, `{job="node-exporter"}`) |
+| `CHECK_INTERVAL_MINUTES` | Tần suất chạy quét (Mặc định: 1 phút) |
+| `LOOKBACK_HOURS` | Số giờ dữ liệu quá khứ để AI học (Mặc định: 720h = 30 ngày) |
+| `ALERT_REPEAT_INTERVAL_MINUTES` | Thời gian lặp lại cảnh báo nếu lỗi chưa sửa (Mặc định: 60) |
+| `CONTAMINATION` | Độ nhạy của thuật toán (Phạm vi: 0.01 - 0.1) |
+| `DATABASE_URL` | Chuỗi kết nối đến PostgreSQL |
 | `PROM_URL` | Địa chỉ hệ thống Prometheus lấy metric |
 | `ALERTMANAGER_URL` | Địa chỉ Alertmanager để gửi cảnh báo |
-| `LOOKBACK_HOURS` | Số giờ dữ liệu quá khứ để AI học (Mặc định: 720h = 30 ngày) |
-| `CONTAMINATION` | Độ nhạy của thuật toán (Phạm vi: 0.01 - 0.1) |
-| `CHECK_INTERVAL_MINUTES` | Tần suất chạy quét (Mặc định: 1 phút) |
-| `DATABASE_URL` | Chuỗi kết nối đến PostgreSQL |
+
+---
+
+## 📖 Hướng dẫn cấu hình Giám sát (Usage Guide)
+
+AIOps Engine có thể học và giám sát bất kỳ chỉ số (metric) nào mà Prometheus cung cấp. Bạn chỉ cần thay đổi giá trị `PROM_QUERY` trong file `.env`.
+
+### 1. Giám sát Sống/Chết (Server Availability)
+Đây là cấu hình mặc định, AI sẽ báo động ngay lập tức nếu server sập (`up=0`).
+```env
+PROM_QUERY=up
+```
+
+### 2. Giám sát Hiệu năng (Performance Monitoring)
+AI sẽ tự học ngưỡng (baseline) của CPU/RAM trong 30 ngày qua. Nếu CPU bình thường chạy 20% bỗng dưng vọt lên 90% và duy trì, AI sẽ gửi cảnh báo.
+
+*   **Giám sát CPU (%)**:
+    ```env
+    PROM_QUERY=100 - (avg by (instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)
+    ```
+*   **Giám sát RAM sử dụng (%)**:
+    ```env
+    PROM_QUERY=(node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes * 100
+    ```
+
+### 3. Giám sát Đa chỉ số (Multiple Metrics)
+Bạn có thể bắt AI theo dõi nhiều thông số cùng một lúc bằng cách sử dụng Regex:
+```env
+PROM_QUERY={__name__=~"up|node_cpu_seconds_total|node_memory_MemAvailable_bytes"}
+```
+
+---
+
+## 🤖 AI Engine vs Binary Guard
+
+Hệ thống sử dụng cơ chế bảo vệ kép:
+1.  **Binary Guard (Lớp bảo vệ cứng)**: Dành riêng cho metric `up`. Nếu giá trị rơi về `0`, hệ thống coi đây là lỗi nghiêm trọng và báo động ngay (Confidence 100%), không cần chờ AI học.
+2.  **AI Engine (Isolation Forest)**: Dành cho các chỉ số biến thiên (CPU, RAM, Traffic). AI sẽ phân tích các điểm dữ liệu bất thường dựa trên mật độ và hình thái biểu đồ (Outlier Detection) so với dữ liệu lịch sử.
 
 ---
 

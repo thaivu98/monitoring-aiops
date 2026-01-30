@@ -10,6 +10,13 @@ class Settings:
     CHECK_INTERVAL_MINUTES: int = int(os.environ.get('CHECK_INTERVAL_MINUTES', 5))
     PROM_SKIP_SSL: bool = os.environ.get('PROM_SKIP_SSL', 'false').lower() == 'true'
     AM_SKIP_SSL: bool = os.environ.get('AM_SKIP_SSL', 'false').lower() == 'true'
+    ALERT_REPEAT_INTERVAL_MINUTES: int = int(os.environ.get('ALERT_REPEAT_INTERVAL_MINUTES', 60))
+    CONTAMINATION: float = float(os.environ.get('CONTAMINATION', 0.05))
+
+    # Auto Discovery
+    METRIC_DISCOVERY_ENABLED: bool = os.environ.get('METRIC_DISCOVERY_ENABLED', 'true').lower() == 'true'
+    METRIC_DISCOVERY_PATTERN: str = os.environ.get('METRIC_DISCOVERY_PATTERN', '^(up|node_cpu_seconds_total|node_memory_.*|node_filesystem_.*|node_network_.*)$')
+    MAX_WORKERS: int = int(os.environ.get('MAX_WORKERS', 10))
 
     # Telegram alerts
     TELEGRAM_ENABLED: bool = os.environ.get('TELEGRAM_ENABLED', 'false').lower() == 'true'

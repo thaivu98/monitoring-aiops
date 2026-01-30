@@ -2,6 +2,7 @@ import os
 import time
 import json
 import logging
+import requests
 from datetime import datetime, timedelta, timezone
 
 from core.config import settings
@@ -40,7 +41,6 @@ def metric_id_from_labels(labels: dict) -> str:
 
 
 def labels_to_selector(metric_name: str, labels: dict) -> str:
-    # Lọc bỏ các nhãn đặc biệt hoặc rỗng
     clean_labels = {k: v for k, v in labels.items() if k != '__name__' and v and str(v) != 'nan'}
     if not clean_labels:
         return metric_name
@@ -49,216 +49,18 @@ def labels_to_selector(metric_name: str, labels: dict) -> str:
     return f"{metric_name}{{{','.join(parts)}}}"
 
 
-def run_once(
-    prometheus_url=None,
-    alertmanager_url=None,
-    query=None,
-    lookback_hours=None,
-    step='5m',
-    suppression_window=5,
-    min_anomalies=3,
-):
-    prometheus_url = prometheus_url or settings.PROM_URL
-    alertmanager_url = alertmanager_url or settings.ALERTMANAGER_URL
-    query = query or settings.PROM_QUERY
-    lookback_hours = lookback_hours or settings.LOOKBACK_HOURS
-
-    # Ensure tables exist
-    Base.metadata.create_all(bind=engine)
-
-    prom = PrometheusClient(prometheus_url, verify_ssl=not settings.PROM_SKIP_SSL)
-    alert_manager = AlertManager()
-    engine_service = AnomalyEngine()
-    llm = LLMClient()
-
-    # 1. Fetch current active series labels (Dùng Instant Query để đảm bảo tìm thấy mọi series đang tồn tại)
-    now_ts = int(time.time())
-    df_active = prom.fetch_instant_metric(query)
-    
-    if df_active.empty:
-        logging.warning(f'No active series found for query: {query}')
-        # Cập nhật status rỗng để user biết
-        status_payload = {
-            'last_run': datetime.now(timezone.utc).isoformat(),
-            'total_series': 0,
-            'metrics': [],
-            'error': 'No active series found'
-        }
-        with open('status.json', 'w') as f:
-            json.dump(status_payload, f, indent=2)
-        return
-    
-    logging.info(f"📥 Received {len(df_active)} unique series from Prometheus.")
-
+def update_status_json(state):
     session = SessionLocal()
-    state = load_state()
     try:
-        # Group by labels to identify unique series
-        group_keys = [c for c in df_active.columns if c not in ('ds', 'y')]
-        
-        if group_keys:
-            # Sửa lại: lọc bỏ các cột có toàn giá trị NaN nếu có
-            group_keys = [k for k in group_keys if df_active[k].notna().any()]
-            # QUAN TRỌNG: set dropna=False để không bị mất series khi có nhãn rỗng
-            series_groups = list(df_active.groupby(group_keys, dropna=False))
-        else:
-            series_groups = [(None, df_active)]
-
-        logging.info(f"📊 Identified {len(series_groups)} unique series to process.")
-
-        for group_val, group_df in series_groups:
-            # Reconstruct labels for this series
-            if group_keys:
-                # group_val can be a single value or a tuple if multiple keys
-                if not isinstance(group_val, tuple):
-                    tmp_vals = (group_val,)
-                else:
-                    tmp_vals = group_val
-                labels = {k: str(tmp_vals[i]) for i, k in enumerate(group_keys)}
-            else:
-                labels = {'metric': query}
-            
-            mid_fingerprint = metric_id_from_labels(labels)
-            if mid_fingerprint not in state:
-                state[mid_fingerprint] = []
-            
-            # 2. Get or Create MetricModel
-            metric = session.query(MetricModel).filter_by(metric_fingerprint=mid_fingerprint).first()
-            if not metric:
-                metric = MetricModel(
-                    metric_fingerprint=mid_fingerprint,
-                    job=labels.get('job'),
-                    instance=labels.get('instance')
-                )
-                session.add(metric)
-                session.flush() # Get ID
-            
-            # 3. Determine delta range
-            last_val_ts = session.query(func.max(MetricValue.timestamp)).filter_by(metric_id=metric.id).scalar()
-            
-            if last_val_ts:
-                fetch_start = int(last_val_ts.timestamp()) + 1
-            else:
-                fetch_start = int((datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=lookback_hours)).timestamp())
-            
-            fetch_end = now_ts
-
-            # 4. Fetch Delta from Prometheus
-            if fetch_end > fetch_start:
-                # Tạo query cụ thể cho series này để tối ưu và tránh nhầm lẫn nhãn
-                metric_name = labels.get('__name__', query)
-                specific_query = labels_to_selector(metric_name, labels)
-                
-                logging.info(f"Syncing {mid_fingerprint}: fetching delta via {specific_query}")
-                df_delta = prom.fetch_metric_series(specific_query, fetch_start, fetch_end, step)
-
-                if not df_delta.empty:
-                    # Save delta to DB
-                    new_values = [
-                        MetricValue(metric_id=metric.id, timestamp=row['ds'], value=row['y'])
-                        for _, row in df_delta.iterrows()
-                    ]
-                    session.add_all(new_values)
-                    session.flush()
-                    logging.info(f"Saved {len(new_values)} incremental points for {mid_fingerprint}")
-
-            # 5. Prune old data
-            prune_threshold = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=lookback_hours)
-            session.query(MetricValue).filter(
-                MetricValue.metric_id == metric.id,
-                MetricValue.timestamp < prune_threshold
-            ).delete()
-
-            # 6. Fetch full window from Local DB for analysis
-            history_data = session.query(MetricValue).filter(
-                MetricValue.metric_id == metric.id,
-                MetricValue.timestamp >= prune_threshold
-            ).order_by(MetricValue.timestamp.asc()).all()
-
-            if len(history_data) < 5:
-                logging.info(f"Insufficient history in local cache for {mid_fingerprint} ({len(history_data)} points)")
-                continue
-
-            df_analysis = pd.DataFrame([{'ds': v.timestamp, 'y': v.value} for v in history_data])
-            
-            # 7. Run Anomaly Detection
-            history_count = len(df_analysis)
-            if history_count < 20:
-                logging.info(f"⚡ [STAGE: LEARNING] {mid_fingerprint}: building local cache ({history_count} points)...")
-            else:
-                logging.info(f"🔍 [STAGE: MONITORING] {mid_fingerprint}: analyzing {history_count} points for anomalies...")
-                
-            result = engine_service.train_and_detect(df_analysis, fingerprint=mid_fingerprint)
-            
-            # 8. Alerting Logic (Stateful)
-            full_state = state if isinstance(state.get('windows'), dict) else {"windows": state, "firing": {}}
-            windows = full_state.get('windows', {})
-            firing_registry = full_state.get('firing', {})
-
-            window = windows.get(mid_fingerprint, [])
-            window.append(1 if result['is_anomaly'] else 0)
-            window = window[-suppression_window:]
-            windows[mid_fingerprint] = window
-            
-            is_currently_firing = firing_registry.get(mid_fingerprint, False)
-
-            # Trigger Firing Alert
-            if not is_currently_firing and sum(window) >= min_anomalies:
-                summary = f"AIOps anomaly: {labels.get('job', mid_fingerprint)}"
-                description = llm.explain_anomaly(mid_fingerprint, result)
-                
-                logging.info(f"🚨 [ALERT] Broadcasting anomaly alert for {mid_fingerprint}")
-                metadata = {
-                    'instance': labels.get('instance', mid_fingerprint),
-                    'severity': 'critical',
-                    'summary': summary,
-                    'status': 'firing'
-                }
-                success = alert_manager.broadcast(
-                    subject='AIOpsAnomalyDetected',
-                    description=description,
-                    metadata=metadata
-                )
-                if success:
-                    firing_registry[mid_fingerprint] = True
-            
-            # Trigger Resolve Alert
-            # Resolve logic: if firing and last N points are normal (0)
-            elif is_currently_firing and sum(window[-min_anomalies:]) == 0:
-                summary = f"AIOps resolved: {labels.get('job', mid_fingerprint)}"
-                description = f"Metric {mid_fingerprint} has returned to normal state after {min_anomalies} consecutive normal observations."
-                
-                logging.info(f"✅ [RESOLVE] Broadcasting resolve notification for {mid_fingerprint}")
-                metadata = {
-                    'instance': labels.get('instance', mid_fingerprint),
-                    'severity': 'info',
-                    'summary': summary,
-                    'status': 'resolved'
-                }
-                success = alert_manager.broadcast(
-                    subject='AIOpsAnomalyResolved',
-                    description=description,
-                    metadata=metadata
-                )
-                if success:
-                    firing_registry[mid_fingerprint] = False
-                    windows[mid_fingerprint] = [] # Reset window after resolve
-            
-            state = {"windows": windows, "firing": firing_registry}
-            
-        save_state(state)
-        
-        # 9. Update Status JSON
         metrics_status = []
-        # Lấy tất cả metric hiện có trong DB liên quan đến job này
         active_metrics = session.query(MetricModel).all()
+        
         for m_obj in active_metrics:
             mid = m_obj.metric_fingerprint
             full_state = state if isinstance(state.get('windows'), dict) else {"windows": state, "firing": {}}
             window = full_state.get('windows', {}).get(mid, [])
             is_firing = full_state.get('firing', {}).get(mid, False)
             
-            # Count local points
             count = session.query(func.count(MetricValue.id)).filter_by(metric_id=m_obj.id).scalar()
             metrics_status.append({
                 'fingerprint': mid,
@@ -275,17 +77,89 @@ def run_once(
             'total_series': len(metrics_status),
             'metrics': metrics_status
         }
-        # Lưu file status
         with open('status.json', 'w') as f:
             json.dump(status_payload, f, indent=2)
-
-        session.commit()
     except Exception as e:
-        session.rollback()
-        logging.error(f"Error during run_once: {e}")
-        raise e
+        logging.error(f"Error updating status.json: {e}")
     finally:
         session.close()
+
+
+def run_once(prom, alert_manager, engine_service, llm, query=None, lookback_hours=None, step='5m'):
+    query = query or settings.PROM_QUERY
+    lookback_hours = lookback_hours or settings.LOOKBACK_HOURS
+    now_ts = int(time.time())
+
+    df_active = prom.fetch_instant_metric(query)
+    if df_active.empty:
+        return {}
+    
+    session = SessionLocal()
+    state_updates = {"windows": {}, "firing": {}}
+    
+    try:
+        group_keys = [c for c in df_active.columns if c not in ('ds', 'y')]
+        if group_keys:
+            group_keys = [k for k in group_keys if df_active[k].notna().any()]
+            series_groups = list(df_active.groupby(group_keys, dropna=False))
+        else:
+            series_groups = [(None, df_active)]
+
+        for group_val, group_df in series_groups:
+            if group_keys:
+                tmp_vals = (group_val,) if not isinstance(group_val, tuple) else group_val
+                labels = {k: str(tmp_vals[i]) for i, k in enumerate(group_keys)}
+            else:
+                labels = {'metric': query}
+            
+            mid_fingerprint = metric_id_from_labels(labels)
+            
+            metric = session.query(MetricModel).filter_by(metric_fingerprint=mid_fingerprint).first()
+            if not metric:
+                metric = MetricModel(metric_fingerprint=mid_fingerprint, job=labels.get('job'), instance=labels.get('instance'))
+                session.add(metric)
+                session.flush()
+            
+            last_val_ts = session.query(func.max(MetricValue.timestamp)).filter_by(metric_id=metric.id).scalar()
+            fetch_start = int(last_val_ts.timestamp()) + 1 if last_val_ts else int((datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=lookback_hours)).timestamp())
+            
+            if now_ts > fetch_start:
+                metric_name = labels.get('__name__', query)
+                specific_query = labels_to_selector(metric_name, labels)
+                df_delta = prom.fetch_metric_series(specific_query, fetch_start, now_ts, step)
+
+                if not df_delta.empty:
+                    new_values = [MetricValue(metric_id=metric.id, timestamp=row['ds'], value=row['y']) for _, row in df_delta.iterrows()]
+                    session.add_all(new_values)
+                    session.flush()
+
+            # 6. Fetch window for analysis (24h baseline)
+            analysis_threshold = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=24)
+            history_data = session.query(MetricValue).filter(MetricValue.metric_id == metric.id, MetricValue.timestamp >= analysis_threshold).order_by(MetricValue.timestamp.asc()).all()
+
+            if len(history_data) < 20: 
+                # Fallback to last 100 points
+                history_data = session.query(MetricValue).filter(MetricValue.metric_id == metric.id).order_by(MetricValue.timestamp.desc()).limit(100).all()
+                history_data.reverse()
+
+            if len(history_data) < 5:
+                continue
+
+            df_analysis = pd.DataFrame([{'ds': v.timestamp, 'y': v.value} for v in history_data])
+            result = engine_service.train_and_detect(df_analysis, fingerprint=mid_fingerprint)
+            
+            state_updates["windows"][mid_fingerprint] = result['is_anomaly']
+            state_updates["firing"][mid_fingerprint] = result 
+
+        session.commit()
+        logging.info(f"✅ Finished metric: {query}")
+    except Exception as e:
+        session.rollback()
+        logging.error(f"Error in run_once ({query}): {e}")
+    finally:
+        session.close()
+
+    return state_updates
 
 
 def wait_for_db(timeout=60):
@@ -295,33 +169,104 @@ def wait_for_db(timeout=60):
             session = SessionLocal()
             session.execute(func.now())
             session.close()
-            logging.info("Database is ready!")
             return True
         except Exception:
-            logging.info("Waiting for database...")
             time.sleep(2)
-    logging.error("Database connection timeout")
     return False
 
 
+def wait_for_prometheus(timeout=60):
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            requests.get(f"{settings.PROM_URL}/api/v1/query?query=up", timeout=5, verify=not settings.PROM_SKIP_SSL)
+            return True
+        except Exception:
+            time.sleep(5)
+    return False
+
+
+import concurrent.futures
+
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    
-    # Wait for DB before starting
-    if not wait_for_db():
-        exit(1)
+    if not wait_for_db(): exit(1)
+    wait_for_prometheus(timeout=30)
+    Base.metadata.create_all(bind=engine)
 
-    logging.info(f"Starting AIOps engine. Interval: {settings.CHECK_INTERVAL_MINUTES}m, Lookback: {settings.LOOKBACK_HOURS}h")
-    
+    prom_client = PrometheusClient(settings.PROM_URL, verify_ssl=not settings.PROM_SKIP_SSL)
+    alert_manager = AlertManager()
+    engine_service = AnomalyEngine()
+    llm = LLMClient()
+
     while True:
         try:
             logging.info("Starting anomaly detection cycle...")
-            run_once()
-            logging.info(f"Cycle complete. Sleeping for {settings.CHECK_INTERVAL_MINUTES} minutes...")
+            cycle_start = time.time()
+            
+            queries = []
+            if settings.METRIC_DISCOVERY_ENABLED:
+                queries = prom_client.discover_metrics(settings.METRIC_DISCOVERY_PATTERN)
+                if not queries: queries = [settings.PROM_QUERY]
+            else:
+                queries = [settings.PROM_QUERY]
+                
+            all_updates = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=settings.MAX_WORKERS) as executor:
+                futures = {executor.submit(run_once, prom_client, alert_manager, engine_service, llm, q): q for q in queries}
+                for f in concurrent.futures.as_completed(futures):
+                    res = f.result()
+                    if res: all_updates.append(res)
+            
+            # STATE UPDATE & ALERTING
+            global_state = load_state()
+            windows = global_state.get('windows', {})
+            firing_registry = global_state.get('firing', {})
+            last_alert_at = global_state.get('last_alert_at', {})
+            
+            for update in all_updates:
+                for mid, is_anom in update["windows"].items():
+                    w = windows.get(mid, [])
+                    w.append(1 if is_anom else 0)
+                    w = w[-5:]
+                    windows[mid] = w
+                    
+                    res = update["firing"][mid]
+                    is_firing = firing_registry.get(mid, False)
+                    
+                    def get_inst(m): return m.split('|instance=')[1].split('|')[0] if '|instance=' in m else m
+
+                    if is_anom: logging.info(f"⚠️ [DETECTED] {mid} | Window: {sum(w)}/3")
+
+                    if not is_firing and (sum(w) >= 3 or res.get('reason') == 'host_down'):
+                        if alert_manager.broadcast("Anomaly Detected", llm.explain_anomaly(mid, res), {'instance': get_inst(mid), 'severity': 'critical', 'status': 'firing'}):
+                            firing_registry[mid], last_alert_at[mid] = True, time.time()
+                    
+                    elif is_firing and is_anom:
+                        if (time.time() - last_alert_at.get(mid, 0)) >= settings.ALERT_REPEAT_INTERVAL_MINUTES * 60:
+                            if alert_manager.broadcast("Anomaly Persisting", llm.explain_anomaly(mid, res), {'instance': get_inst(mid), 'severity': 'critical', 'status': 'repeating'}):
+                                last_alert_at[mid] = time.time()
+                    
+                    elif is_firing and sum(w[-3:]) == 0:
+                        if alert_manager.broadcast("Anomaly Resolved", f"Metric {mid} returned to normal.", {'instance': get_inst(mid), 'severity': 'info', 'status': 'resolved'}):
+                            firing_registry[mid] = False
+                            last_alert_at.pop(mid, None)
+                            windows[mid] = [0] * 5
+
+            save_state({"windows": windows, "firing": firing_registry, "last_alert_at": last_alert_at})
+            update_status_json(load_state())
+
+            # GLOBAL PRUNING
+            session = SessionLocal()
+            try:
+                prune_limit = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=settings.LOOKBACK_HOURS)
+                session.query(MetricValue).filter(MetricValue.timestamp < prune_limit).delete()
+                session.commit()
+            finally: session.close()
+            
+            logging.info(f"Cycle complete in {time.time() - cycle_start:.1f}s. Sleeping {settings.CHECK_INTERVAL_MINUTES}m...")
         except Exception as e:
-            logging.error(f"Error in detection cycle: {e}")
-            logging.info("Retrying in 1 minute...")
+            logging.error(f"Cycle error: {e}")
             time.sleep(60)
-            continue
             
         time.sleep(settings.CHECK_INTERVAL_MINUTES * 60)

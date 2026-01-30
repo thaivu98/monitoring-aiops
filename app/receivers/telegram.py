@@ -14,8 +14,12 @@ class TelegramReceiver(BaseReceiver):
             return False
 
         status = metadata.get('status', 'firing')
-        icon = "🔥" if status == 'firing' else "✅"
-        title = "AI PHÁT HIỆN LỖI!" if status == 'firing' else "SỰ CỐ ĐÃ ĐƯỢC KHẮC PHỤC"
+        if status == 'firing':
+            icon, title = "🔥", "AI PHÁT HIỆN LỖI!"
+        elif status == 'repeating':
+            icon, title = "🔄", "NHẮC NHỞ: SỰ CỐ VẪN ĐANG DIỄN RA"
+        else:
+            icon, title = "✅", "SỰ CỐ ĐÃ ĐƯỢC KHẮC PHỤC"
         
         message = (
             f"🤖 <b>{title}</b>\n"

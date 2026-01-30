@@ -84,3 +84,28 @@ class PrometheusClient:
         except Exception as e:
             logging.error(f"Error fetching from Prometheus: {e}")
             return pd.DataFrame()
+
+    def discover_metrics(self, pattern: str = None) -> list:
+        """
+        Khám phá tất cả các metric name hiện có trên Prometheus.
+        Hỗ trợ lọc theo regex pattern.
+        """
+        url = f"{self.base_url}/api/v1/label/__name__/values"
+        try:
+            response = requests.get(url, timeout=10, verify=self.verify_ssl)
+            response.raise_for_status()
+            data = response.json()
+            
+            if data['status'] == 'success':
+                metrics = data['data']
+                if pattern:
+                    import re
+                    regex = re.compile(pattern)
+                    # Lọc metric khớp pattern va loai bo cac metric noi bo cua prometheus
+                    metrics = [m for m in metrics if regex.match(m)]
+                
+                return sorted(metrics)
+        except Exception as e:
+            logging.error(f"Error discovering metrics: {e}")
+        
+        return []

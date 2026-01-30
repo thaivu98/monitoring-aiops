@@ -41,9 +41,18 @@ class AlertManager:
             return False
 
         any_success = False
+        any_success = False
         for receiver in self.receivers:
-            success = receiver.send(subject, description, metadata)
-            if success:
-                any_success = True
+            receiver_name = receiver.__class__.__name__
+            logging.info(f"Broadcasting to {receiver_name}...")
+            try:
+                success = receiver.send(subject, description, metadata)
+                if success:
+                    any_success = True
+                    logging.info(f"Broadcast to {receiver_name} succeeded.")
+                else:
+                    logging.warning(f"Broadcast to {receiver_name} failed.")
+            except Exception as e:
+                 logging.error(f"Broadcast to {receiver_name} crashed: {e}")
         
         return any_success

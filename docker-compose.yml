@@ -8,20 +8,26 @@ services:
     container_name: aiops-app
     env_file:
       - .env
+    environment:
+      - TZ=Asia/Ho_Chi_Minh
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
       - ./app:/app
+      - /etc/localtime:/etc/localtime:ro
 
   postgres:
     image: pgvector/pgvector:pg16
     container_name: aiops-postgres
     env_file:
       - .env
+    environment:
+      - TZ=Asia/Ho_Chi_Minh
     volumes:
       - ./database:/var/lib/postgresql/data
       - ./app/core/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+      - /etc/localtime:/etc/localtime:ro
     ports:
       - "5432:5432"
     healthcheck:

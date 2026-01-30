@@ -22,7 +22,13 @@ class EmailReceiver(BaseReceiver):
         msg['From'] = self.sender
         msg['To'] = ", ".join(self.recipients)
         status = metadata.get('status', 'firing')
-        subject_prefix = "[AIOps Alert]" if status == 'firing' else "[AIOps Resolved]"
+        if status == 'firing':
+            subject_prefix = "[AIOps Alert]"
+        elif status == 'repeating':
+            subject_prefix = "[AIOps REMINDER]"
+        else:
+            subject_prefix = "[AIOps Resolved]"
+        
         msg['Subject'] = f"{subject_prefix} {subject}"
 
         body = (
@@ -38,7 +44,7 @@ class EmailReceiver(BaseReceiver):
         msg.attach(MIMEText(body, 'plain'))
 
         try:
-            with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
+            with smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=30) as server:
                 server.starttls()
                 if self.smtp_user and self.smtp_pass:
                     server.login(self.smtp_user, self.smtp_pass)

@@ -8,10 +8,12 @@ from core.database import SessionLocal
 from sqlalchemy.exc import SQLAlchemyError
 
 
+from core.config import settings
+
 class AnomalyEngine:
     __module__ = 'hour_sin'
-    def __init__(self, contamination=0.05):
-        self.contamination = contamination
+    def __init__(self, contamination=None):
+        self.contamination = contamination if contamination is not None else settings.CONTAMINATION
 
     def __repr__(self):
         return f"<AnomalyEngine features: hour_sin, hour_cos, weekday_sin, weekday_cos>"
@@ -83,7 +85,8 @@ class AnomalyEngine:
 
         # [NEW] Binary Metric Guard: Nếu là metric 'up' mà giá trị là 0, thì chắc chắn là lỗi
         # Kiểm tra fingerprint để biết đây là metric trạng thái
-        is_up_metric = fingerprint and 'up' in fingerprint.split('|')[0] 
+        # Fingerprint format: name=val|name2=val2...
+        is_up_metric = fingerprint and (fingerprint.startswith('__name__=up|') or fingerprint == 'up' or '|__name__=up|' in fingerprint)
         
         if is_up_metric:
             if last == 0:
@@ -108,28 +111,4 @@ class AnomalyEngine:
         df = self.preprocess(df)
         df = self.add_time_features(df)
         result = self.detect(df, contamination=contamination, fingerprint=fingerprint)
-
-        # Optionally persist metric profile and anomaly events
-        if fingerprint:
-            session = SessionLocal()
-            try:
-                mean = float(df['y'].mean())
-                std = float(df['y'].std(ddof=0))
-                # upsert metric model
-                mm = session.query(MetricModel).filter(MetricModel.metric_fingerprint == fingerprint).one_or_none()
-                if mm is None:
-                    mm = MetricModel(metric_fingerprint=fingerprint, mean=mean, std=std)
-                    session.add(mm)
-                else:
-                    mm.mean = mean
-                    mm.std = std
-                if result['is_anomaly']:
-                    ae = AnomalyEvent(metric_fingerprint=fingerprint, description=result.get('explanation',''))
-                    session.add(ae)
-                session.commit()
-            except SQLAlchemyError:
-                session.rollback()
-            finally:
-                session.close()
-
         return result
